@@ -23,10 +23,21 @@ struct KeySnapshot {
     bool down{false};
     bool left{false};
     bool right{false};
+    bool plus{false};
+    bool minus{false};
     bool escape{false};
+#ifdef __linux__
+    // Linux evdev只提供物理键状态；保留组合键状态以正确识别Shift+=。
+    bool leftShift{false};
+    bool rightShift{false};
+    bool equalKey{false};
+    bool minusKey{false};
+    bool keypadPlus{false};
+    bool keypadMinus{false};
+#endif
 };
 
-std::array<JogRequest, 2> makeJogRequests(const KeySnapshot& keys);
+std::array<JogRequest, 3> makeJogRequests(const KeySnapshot& keys);
 
 #ifdef __linux__
 void applyEvdevKeyEvent(unsigned short type,

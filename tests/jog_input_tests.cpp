@@ -44,8 +44,41 @@ void testIgnoredEventsDoNotChangeState()
     applyEvdevKeyEvent(EV_KEY, KEY_A, 1, keys);
 
     expect(keys.left, "unrelated events should preserve existing state");
-    expect(!keys.up && !keys.down && !keys.right && !keys.escape,
+    expect(!keys.up && !keys.down && !keys.right && !keys.plus && !keys.minus
+               && !keys.escape,
            "unrelated events should not set tracked keys");
+}
+
+void testZKeyPressReleaseAndMapping()
+{
+    KeySnapshot keys;
+
+    applyEvdevKeyEvent(EV_KEY, KEY_EQUAL, 1, keys);
+    expect(!keys.plus, "equal without Shift must not start Z positive");
+    applyEvdevKeyEvent(EV_KEY, KEY_LEFTSHIFT, 1, keys);
+    expect(keys.plus, "Shift+= should set Z positive");
+    expect(makeJogRequests(keys)[2] == JogRequest{3, true},
+           "plus should map to Z positive");
+    applyEvdevKeyEvent(EV_KEY, KEY_LEFTSHIFT, 0, keys);
+    expect(!keys.plus, "releasing Shift while equal is held should stop Z positive");
+    applyEvdevKeyEvent(EV_KEY, KEY_EQUAL, 0, keys);
+
+    applyEvdevKeyEvent(EV_KEY, KEY_MINUS, 1, keys);
+    expect(keys.minus, "main minus should set Z negative");
+    expect(makeJogRequests(keys)[2] == JogRequest{3, false},
+           "minus should map to Z negative");
+    applyEvdevKeyEvent(EV_KEY, KEY_LEFTSHIFT, 1, keys);
+    expect(!keys.minus, "Shift+minus underscore must not start Z negative");
+    applyEvdevKeyEvent(EV_KEY, KEY_LEFTSHIFT, 0, keys);
+    applyEvdevKeyEvent(EV_KEY, KEY_MINUS, 0, keys);
+
+    applyEvdevKeyEvent(EV_KEY, KEY_KPPLUS, 1, keys);
+    expect(keys.plus, "keypad plus should set Z positive");
+    applyEvdevKeyEvent(EV_KEY, KEY_KPMINUS, 1, keys);
+    expect(makeJogRequests(keys)[2] == JogRequest{},
+           "opposite Z keys should cancel Z");
+    applyEvdevKeyEvent(EV_KEY, KEY_KPPLUS, 0, keys);
+    applyEvdevKeyEvent(EV_KEY, KEY_KPMINUS, 0, keys);
 }
 
 void testDirectionMapping()
@@ -213,6 +246,7 @@ int main()
 {
     testArrowPressReleaseAndRepeat();
     testIgnoredEventsDoNotChangeState();
+    testZKeyPressReleaseAndMapping();
     testDirectionMapping();
     testOppositeKeysCancelOnlyTheirAxis();
     testEscapePressAndRelease();

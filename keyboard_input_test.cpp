@@ -70,6 +70,8 @@ void printSnapshot(const KeySnapshot& keys)
               << " DOWN=" << keys.down
               << " LEFT=" << keys.left
               << " RIGHT=" << keys.right
+              << " PLUS=" << keys.plus
+              << " MINUS=" << keys.minus
               << " ESC=" << keys.escape << '\n';
 }
 
@@ -79,6 +81,8 @@ bool sameSnapshot(const KeySnapshot& left, const KeySnapshot& right)
         && left.down == right.down
         && left.left == right.left
         && left.right == right.right
+        && left.plus == right.plus
+        && left.minus == right.minus
         && left.escape == right.escape;
 }
 
@@ -114,7 +118,7 @@ int main(int argc, char* argv[])
     }
 
     std::cout << "Keyboard reader active: " << argv[1] << '\n'
-              << "Press and release arrow keys. Press ESC or Ctrl+C to exit.\n"
+              << "Press and release arrow keys and +/- keys. Press ESC or Ctrl+C to exit.\n"
               << "This diagnostic does not connect to or command the robot.\n";
 
     KeySnapshot previous;

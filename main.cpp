@@ -29,9 +29,10 @@ constexpr int kDefaultSpeedPercent = 10;
 constexpr auto kJogPeriod = std::chrono::milliseconds(100);
 constexpr auto kKeyboardPollPeriod = std::chrono::milliseconds(10);
 constexpr auto kServoStatePollPeriod = std::chrono::milliseconds(100);
+constexpr auto kServoHealthCheckPeriod = std::chrono::milliseconds(200);
 constexpr auto kServoStateTimeout = std::chrono::seconds(5);
 constexpr auto kServoRecoveryPeriod = std::chrono::milliseconds(300);
-constexpr auto kServoRecoveryTimeout = std::chrono::seconds(30);
+constexpr int kStableRunningSamples = 3;
 
 #ifdef _WIN32
 std::atomic_bool g_exitRequested{false};
@@ -59,13 +60,6 @@ void signalHandler(int)
 }
 #endif
 
-void controllerErrorCallback(int messageType, const char* message, int messageCode)
-{
-    std::cerr << "[CONTROLLER ERROR/WARNING] type=" << messageType
-              << " code=" << messageCode
-              << " message=" << (message != nullptr ? message : "") << '\n';
-}
-
 void controllerMessageCallback(int messageId, const char* message)
 {
     std::cout << "[CONTROLLER MESSAGE] id=" << messageId
@@ -84,6 +78,22 @@ const char* resultText(Result result)
     case TIMEOUT: return "TIMEOUT";
     default: return "UNKNOWN";
     }
+}
+
+// 所有连接和重连都从这里进入：先关闭本进程持有的旧 SDK 连接，再建立新连接。
+bool reconnectRobot(SOCKETFD& socket, const std::string& ip, const std::string& port)
+{
+    if (socket >= 0) {
+        std::cout << "Cleaning up existing SDK connection before reconnecting...\n";
+        disconnect_robot(socket);
+        socket = -1;
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    }
+
+    // 不额外创建裸TCP探测连接。部分控制器的6001服务为单连接，
+    // 探测连接刚关闭时立即调用SDK会触发Connection refused。
+    socket = connect_robot(ip, port);
+    return socket >= 0;
 }
 
 #ifdef _WIN32
@@ -146,6 +156,11 @@ public:
                 if (record.EventType == FOCUS_EVENT) {
                     if (!record.Event.FocusEvent.bSetFocus) {
                         keys_ = {};
+                        shiftDown_ = false;
+                        mainPlusKeyDown_ = false;
+                        keypadPlusDown_ = false;
+                        mainMinusKeyDown_ = false;
+                        keypadMinusDown_ = false;
                     }
                     continue;
                 }
@@ -155,14 +170,22 @@ public:
 
                 const KEY_EVENT_RECORD& key = record.Event.KeyEvent;
                 const bool down = key.bKeyDown != FALSE;
+                shiftDown_ = (key.dwControlKeyState & SHIFT_PRESSED) != 0;
                 switch (key.wVirtualKeyCode) {
                 case VK_UP: keys_.up = down; break;
                 case VK_DOWN: keys_.down = down; break;
                 case VK_LEFT: keys_.left = down; break;
                 case VK_RIGHT: keys_.right = down; break;
+                case VK_OEM_PLUS: mainPlusKeyDown_ = down; break;
+                case VK_ADD: keypadPlusDown_ = down; break;
+                case VK_OEM_MINUS: mainMinusKeyDown_ = down; break;
+                case VK_SUBTRACT: keypadMinusDown_ = down; break;
                 case VK_ESCAPE: keys_.escape = down; break;
                 default: break;
                 }
+                // 主键盘+要求Shift+=，主键盘-要求未按Shift；数字键盘不受Shift影响。
+                keys_.plus = keypadPlusDown_ || (mainPlusKeyDown_ && shiftDown_);
+                keys_.minus = keypadMinusDown_ || (mainMinusKeyDown_ && !shiftDown_);
             }
 
             if (!GetNumberOfConsoleInputEvents(input_, &pending)) {
@@ -179,6 +202,11 @@ private:
     HANDLE input_{INVALID_HANDLE_VALUE};
     DWORD originalMode_{0};
     bool valid_{false};
+    bool shiftDown_{false};
+    bool mainPlusKeyDown_{false};
+    bool keypadPlusDown_{false};
+    bool mainMinusKeyDown_{false};
+    bool keypadMinusDown_{false};
     KeySnapshot keys_;
 };
 #endif
@@ -272,22 +300,28 @@ bool waitForServoState(SOCKETFD socket, int expectedState)
     return false;
 }
 
-bool ensureServoRunning(SOCKETFD socket, bool& poweredOnByDemo)
+bool ensureServoRunning(SOCKETFD socket,
+                        bool& poweredOnByDemo,
+                        bool restartIfAlreadyRunning)
 {
-    const auto deadline = std::chrono::steady_clock::now() + kServoRecoveryTimeout;
     bool mustPowerCycleAfterAlarm = false;
+    bool powerOnSucceededByDemo = false;
     int clearAttempts = 0;
     int powerOnAttempts = 0;
+    int stableRunningSamples = 0;
 
-    while (std::chrono::steady_clock::now() < deadline) {
+    // 报警未解除时持续恢复，不设置超时；操作者可随时用Ctrl+C终止。
+    while (!g_exitRequested) {
         int state = -1;
         if (!requireSuccess(get_servo_state(socket, state), "get_servo_state")) {
             return false;
         }
 
         if (state == 2) {
+            stableRunningSamples = 0;
             // SDK 要求报警清除后先释放伺服占用，再重新上电。
             mustPowerCycleAfterAlarm = true;
+            powerOnSucceededByDemo = false;
             ++clearAttempts;
             std::cout << "Servo alarm detected. clear_error attempt "
                       << clearAttempts << "...\n";
@@ -297,28 +331,51 @@ bool ensureServoRunning(SOCKETFD socket, bool& poweredOnByDemo)
                           << " (" << static_cast<int>(result)
                           << "); retrying...\n";
             }
+            // state=2不能直接运动；清错后尝试切到就绪态，若控制器仍有故障则继续循环。
+            const Result readyResult = set_servo_state(socket, 1);
+            if (readyResult != SUCCESS) {
+                std::cerr << "set_servo_state(1) while recovering failed: "
+                          << resultText(readyResult)
+                          << " (" << static_cast<int>(readyResult)
+                          << "); alarm may still be active.\n";
+            }
             std::this_thread::sleep_for(kServoRecoveryPeriod);
             continue;
         }
 
         if (state == 3) {
-            if (!mustPowerCycleAfterAlarm) {
-                std::cout << "Servo is running.\n";
-                return true;
+            // 本程序完成上电后再次读到运行态，说明重启流程已经闭环。
+            // 必须立即返回，否则会把确认成功的运行态误判为初始上电态而反复下电。
+            if (!mustPowerCycleAfterAlarm
+                && (powerOnSucceededByDemo || !restartIfAlreadyRunning)) {
+                ++stableRunningSamples;
+                if (stableRunningSamples >= kStableRunningSamples) {
+                    std::cout << "Servo running state confirmed by "
+                              << stableRunningSamples << " consecutive checks.\n";
+                    return true;
+                }
+                std::this_thread::sleep_for(kServoStatePollPeriod);
+                continue;
             }
 
-            // SDK 要求：若报警前处于运行状态，清错后必须先下电释放占用，
-            // 然后才能再次上电。
-            std::cout << "Alarm cleared to running state; powering off before restart...\n";
+            // 初次检测到已经上电，或报警清除后仍是运行态：只执行一次下电，
+            // 随后通过就绪态重新上电。
+            std::cout << (mustPowerCycleAfterAlarm
+                              ? "Alarm cleared to running state; powering off before restart...\n"
+                              : "Servo is already running; powering off before restart...\n");
             if (!requireSuccess(set_servo_poweroff(socket),
-                                "set_servo_poweroff(after clear_error)")) {
+                                "set_servo_poweroff(before restart)")) {
                 return false;
             }
+            poweredOnByDemo = true;
+            powerOnSucceededByDemo = false;
+            stableRunningSamples = 0;
             std::this_thread::sleep_for(kServoRecoveryPeriod);
             continue;
         }
 
         if (state == 0) {
+            stableRunningSamples = 0;
             std::cout << "Setting servo to ready state...\n";
             if (!requireSuccess(set_servo_state(socket, 1),
                                 "set_servo_state(ready)")) {
@@ -329,12 +386,14 @@ bool ensureServoRunning(SOCKETFD socket, bool& poweredOnByDemo)
         }
 
         if (state == 1) {
+            stableRunningSamples = 0;
             // 只有就绪态允许调用上电接口；成功后仍需轮询确认运行态。
             ++powerOnAttempts;
             std::cout << "Servo ready. Power-on attempt " << powerOnAttempts << "...\n";
             const Result result = set_servo_poweron(socket);
             if (result == SUCCESS) {
                 poweredOnByDemo = true;
+                powerOnSucceededByDemo = true;
                 mustPowerCycleAfterAlarm = false;
             } else {
                 std::cerr << "set_servo_poweron failed: " << resultText(result)
@@ -349,10 +408,7 @@ bool ensureServoRunning(SOCKETFD socket, bool& poweredOnByDemo)
         return false;
     }
 
-    std::cerr << "Timed out after "
-              << std::chrono::duration_cast<std::chrono::seconds>(kServoRecoveryTimeout).count()
-              << " seconds while clearing alarms and powering on. "
-                 "Check emergency stop, safety circuit, and the controller alarm details.\n";
+    std::cerr << "Servo recovery cancelled by exit request.\n";
     return false;
 }
 
@@ -396,25 +452,24 @@ int main(int argc, char* argv[])
     std::signal(SIGHUP, signalHandler);
 #endif
 
+    SOCKETFD socket = -1;
     std::cout << "Connecting to " << ip << ':' << port << " ...\n";
-    const SOCKETFD socket = connect_robot(ip, port);
-    if (socket < 0) {
+    if (!reconnectRobot(socket, ip, port)) {
         std::cerr << "connect_robot failed.\n";
         return 1;
     }
 
-    if (!requireSuccess(
-            set_receive_error_or_warnning_message_callback(socket, controllerErrorCallback),
-            "set_receive_error_or_warnning_message_callback")
-        || !requireSuccess(recv_message(socket, controllerMessageCallback),
-                           "recv_message")) {
+    // 暂不注册错误/警告回调，避免普通警告在运行态触发清错和电源恢复动作。
+    // 安全判断统一以主循环主动读取的伺服状态为准。
+    if (!requireSuccess(recv_message(socket, controllerMessageCallback),
+                        "recv_message")) {
         disconnect_robot(socket);
         return 1;
     }
 
     bool connected = true;
     bool poweredOnByDemo = false;
-    std::array<bool, 2> activeAxes{false, false};
+    std::array<bool, 3> activeAxes{false, false, false};
     int previousMode = -1;
     int initialServoState = -1;
     auto cleanup = [&]() {
@@ -491,7 +546,7 @@ int main(int argc, char* argv[])
     }
     initialServoState = servoState;
 
-    if (!ensureServoRunning(socket, poweredOnByDemo)) {
+    if (!ensureServoRunning(socket, poweredOnByDemo, true)) {
         cleanup();
         return 1;
     }
@@ -521,11 +576,12 @@ int main(int argc, char* argv[])
         << "Connected. Cartesian coordinate mode selected.\n"
         << "Hold UP for X+, hold DOWN for X-.\n"
         << "Hold LEFT for Y+, hold RIGHT for Y-.\n"
-        << "X and Y may be jogged together; opposite keys on the same axis cancel that axis.\n"
+        << "Hold + for Z+, hold - for Z-.\n"
+        << "X, Y and Z may be jogged together; opposite keys on the same axis cancel that axis.\n"
         << "Release the key to stop. Press ESC or Ctrl+C to exit.\n"
         << "Speed: " << speed << "%\n";
 
-    std::array<JogRequest, 2> activeRequests{};
+    std::array<JogRequest, 3> activeRequests{};
 #ifdef _WIN32
     ConsoleKeyReader keyReader;
     if (!keyReader.valid()) {
@@ -537,10 +593,12 @@ int main(int argc, char* argv[])
 #else
     std::cout << "[INPUT] Linux evdev reader active: " << inputDevice << '\n';
 #endif
-    std::array<std::chrono::steady_clock::time_point, 2> nextJogSend{
+    std::array<std::chrono::steady_clock::time_point, 3> nextJogSend{
+        std::chrono::steady_clock::now(),
         std::chrono::steady_clock::now(),
         std::chrono::steady_clock::now()
     };
+    auto nextServoHealthCheck = std::chrono::steady_clock::now();
 
     while (!g_exitRequested) {
         KeySnapshot keys;
@@ -557,9 +615,48 @@ int main(int argc, char* argv[])
             break;
         }
 
+        const auto now = std::chrono::steady_clock::now();
+
+        // 运行中只依据主动查询到的真实伺服状态处理，不响应错误/警告回调。
+        if (now >= nextServoHealthCheck) {
+            int liveServoState = -1;
+            if (!requireSuccess(get_servo_state(socket, liveServoState),
+                                "get_servo_state(runtime health check)")) {
+                break;
+            }
+
+            if (liveServoState != 3) {
+                std::cerr << "Non-running servo state detected (state="
+                          << liveServoState
+                          << "); stopping all jogging before recovery.\n";
+                for (std::size_t i = 0; i < activeRequests.size(); ++i) {
+                    if (activeRequests[i].axis != 0 || activeAxes[i]) {
+                        stopJog(socket, static_cast<int>(i) + 1);
+                    }
+                    activeRequests[i] = {};
+                    activeAxes[i] = false;
+                }
+
+                if (!ensureServoRunning(socket, poweredOnByDemo, false)) {
+                    break;
+                }
+#ifdef __linux__
+                // 故障恢复期间可能积压按键；恢复后要求操作者重新按键。
+                if (!keyReader.discardPendingEvents()) {
+                    std::cerr << keyReader.error() << "; stopping for safety.\n";
+                    break;
+                }
+#endif
+                nextServoHealthCheck = std::chrono::steady_clock::now()
+                    + kServoHealthCheckPeriod;
+                continue;
+            }
+
+            nextServoHealthCheck = now + kServoHealthCheckPeriod;
+        }
+
         // 将当前按键快照转换为每个轴的目标请求，再与上一周期状态比较。
         const auto requestedRequests = makeJogRequests(keys);
-        const auto now = std::chrono::steady_clock::now();
 
         for (std::size_t i = 0; i < activeRequests.size(); ++i) {
             JogRequest& activeRequest = activeRequests[i];
