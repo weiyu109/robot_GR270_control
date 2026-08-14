@@ -1,0 +1,15 @@
+# 构建目录和本地生成文件
+build/
+**/build/
+*.obj
+*.exe
+
+# SDK 压缩包是重复分发文件；提交解压后的 SDK 目录
+*.zip
+*.rar
+
+# 本地运行状态/IDE 文件
+.omx/
+.idea/
+.vscode/
+

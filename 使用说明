@@ -1,0 +1,47 @@
+  1. 进入项目目录：
+
+  cd ~/wydata/keyboard_jog_demo
+
+  2. 检查键盘读取权限：
+
+  test -r /dev/input/by-path/platform-i8042-serio-0-event-kbd \
+    && echo "键盘权限正常" \
+    || echo "没有键盘权限"
+
+  3. 如果显示“键盘权限正常”，启动 demo：
+
+  ./build/keyboard_jog_demo \
+    192.168.1.13 \
+    6001 \
+    10 \
+    /dev/input/by-path/platform-i8042-serio-0-event-kbd
+
+  参数含义：
+
+  - 192.168.1.13：控制器 IP
+  - 6001：控制器端口
+  - 10：速度百分比
+  - 最后一个参数：笔记本键盘设备
+
+  连接成功后，确认现场安全，再输入：
+
+  ENABLE
+
+  控制方式：
+
+  - ↑：X+
+  - ↓：X-
+  - ←：Y+
+  - →：Y-
+  - 松开方向键：停止
+  - Esc 或 Ctrl+C：停止并退出
+
+  如果提示 Permission denied：
+
+  sudo usermod -aG input "$(id -un)"
+  newgrp input
+
+  然后在新 shell 中重新执行启动命令。
+
+  首次运行请保持速度 10、机械臂空载、急停可用。Ubuntu 的方向键读取是全局的，程序
+  运行期间不要切换到其他窗口操作方向键。
