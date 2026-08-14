@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "cpp/interface/nrc_interface.h"
+#include "cpp/interface/nrc_queue_operate.h"
 
 using ControllerMessageCallback = void (*)(int messageId, const char* message);
 
@@ -41,6 +42,15 @@ public:
                                       std::vector<double>& position) = 0;
     virtual Result moveJoint(SOCKETFD socket, const MoveCmd& command) = 0;
     virtual Result moveLinear(SOCKETFD socket, const MoveCmd& command) = 0;
+
+    virtual Result getToolNumber(SOCKETFD socket, int& toolNumber) = 0;
+    virtual Result getToolParam(SOCKETFD socket, int toolNumber, ToolParam& param) = 0;
+    virtual Result setToolParam(SOCKETFD socket, int toolNumber, const ToolParam& param) = 0;
+
+    virtual Result queueSetStatus(SOCKETFD socket, bool enabled) = 0;
+    virtual Result queueClearData(SOCKETFD socket) = 0;
+    virtual Result queuePushMoveLinear(SOCKETFD socket, const MoveCmd& command) = 0;
+    virtual Result queueSend(SOCKETFD socket, int size, bool isContinue) = 0;
 };
 
 // 生产环境适配器：把抽象接口逐一转发到纳博特/Inexbot C++ SDK。
@@ -73,6 +83,15 @@ public:
                               std::vector<double>& position) override;
     Result moveJoint(SOCKETFD socket, const MoveCmd& command) override;
     Result moveLinear(SOCKETFD socket, const MoveCmd& command) override;
+
+    Result getToolNumber(SOCKETFD socket, int& toolNumber) override;
+    Result getToolParam(SOCKETFD socket, int toolNumber, ToolParam& param) override;
+    Result setToolParam(SOCKETFD socket, int toolNumber, const ToolParam& param) override;
+
+    Result queueSetStatus(SOCKETFD socket, bool enabled) override;
+    Result queueClearData(SOCKETFD socket) override;
+    Result queuePushMoveLinear(SOCKETFD socket, const MoveCmd& command) override;
+    Result queueSend(SOCKETFD socket, int size, bool isContinue) override;
 };
 
 const char* sdkResultText(Result result);

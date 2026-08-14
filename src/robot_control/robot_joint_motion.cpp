@@ -1,6 +1,8 @@
 #include "robot_control/robot_jog_controller.h"
 
 #include <algorithm>
+#include <iostream>
+#include <vector>
 
 // 关节位置控制：把 J1..Jn 目标角度封装为 MoveCmd，并调用 robot_movej。
 bool RobotJogController::moveJoints(const JointMoveCommand& command)
@@ -25,4 +27,30 @@ bool RobotJogController::moveJoints(const JointMoveCommand& command)
     sdkCommand.acc = command.accelerationPercent;
     sdkCommand.dec = command.decelerationPercent;
     return requireSuccess(sdk_.moveJoint(socket_, sdkCommand), "robot_movej");
+}
+
+// 关节相对控制：读取当前关节数组，只修改指定关节后发送一次 robot_movej。
+bool RobotJogController::moveJointRelative(int jointNumber,
+                                           double deltaDegrees,
+                                           double velocityPercent)
+{
+    if (!connected_ || jointNumber < 1 || jointNumber > 7) {
+        return false;
+    }
+    std::vector<double> currentJoints;
+    if (!requireSuccess(sdk_.getCurrentPosition(socket_, 0, currentJoints),
+                        "get_current_position(joint)")) {
+        return false;
+    }
+    if (currentJoints.size() < 7) {
+        std::cerr << "Joint position query returned fewer than 7 values.\n";
+        return false;
+    }
+
+    JointMoveCommand command;
+    std::copy_n(currentJoints.begin(), 7, command.targetDegrees.begin());
+    command.axisCount = 6;
+    command.targetDegrees[static_cast<std::size_t>(jointNumber - 1)] += deltaDegrees;
+    command.velocityPercent = velocityPercent;
+    return moveJoints(command);
 }

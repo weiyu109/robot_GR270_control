@@ -37,13 +37,18 @@ const std::string& EvdevKeyReader::error() const
 
 bool EvdevKeyReader::discardPendingEvents()
 {
-    // ENABLE 前清掉残留按键，避免启动点动时误继承之前的按键状态。
+    // 进入菜单遥操作前清掉残留按键，避免启动点动时误继承之前的按键状态。
     KeySnapshot ignored;
     if (!poll(ignored)) {
         return false;
     }
     keys_ = {};
     return true;
+}
+
+bool EvdevKeyReader::poll(KeySnapshot& snapshot)
+{
+    return poll(snapshot, nullptr);
 }
 
 bool EvdevKeyReader::fail(const std::string& message, KeySnapshot& snapshot)

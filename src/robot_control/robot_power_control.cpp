@@ -8,6 +8,7 @@ namespace {
 
 constexpr auto kServoStatePollPeriod = std::chrono::milliseconds(100);
 constexpr auto kServoStateTimeout = std::chrono::seconds(5);
+constexpr auto kPowerRetryPeriod = std::chrono::milliseconds(300);
 
 } // namespace
 
@@ -51,9 +52,66 @@ bool RobotJogController::powerOff()
     if (!requireSuccess(result, "set_servo_poweroff")) {
         return false;
     }
-    poweredOnBySession_ = false;
     joggingEnabled_ = false;
-    return waitForServoState(static_cast<int>(ServoState::Ready));
+    if (!waitForServoState(static_cast<int>(ServoState::Ready))) {
+        // 未确认 Ready 前继续保留本会话的下电责任，供 shutdown() 重试。
+        return false;
+    }
+    poweredOnBySession_ = false;
+    return true;
+}
+
+// 循环安全上电：复用清错/Ready/Running 状态机，已经上电时不重复下电重启。
+bool RobotJogController::powerOnUntilRunning(const ExitRequested& exitRequested)
+{
+    if (!connected_) {
+        return false;
+    }
+    if (initialServoState_ < 0 && !getServoState(initialServoState_)) {
+        return false;
+    }
+    if (!ensureServoRunning(exitRequested, false)) {
+        return false;
+    }
+    poweredOnBySession_ = true;
+    return true;
+}
+
+// 循环安全下电：报警时先循环清错，Running 时反复下电直到 Ready/Stopped。
+bool RobotJogController::powerOffUntilReady(const ExitRequested& exitRequested)
+{
+    if (!connected_) {
+        return false;
+    }
+    while (!exitRequested()) {
+        int state = -1;
+        if (!getServoState(state)) {
+            return false;
+        }
+        if (state == static_cast<int>(ServoState::Ready)
+            || state == static_cast<int>(ServoState::Stopped)) {
+            poweredOnBySession_ = false;
+            joggingEnabled_ = false;
+            return true;
+        }
+        if (state == static_cast<int>(ServoState::Alarm)) {
+            if (!clearErrorUntilReady(exitRequested)) {
+                return false;
+            }
+            continue;
+        }
+        if (state == static_cast<int>(ServoState::Running) && powerOff()) {
+            return true;
+        }
+        std::this_thread::sleep_for(kPowerRetryPeriod);
+    }
+    return false;
+}
+
+// 接管退出下电责任：满足“关闭页面必须确认下电后再断开”的终端要求。
+void RobotJogController::requirePowerOffOnShutdown()
+{
+    powerOffRequiredOnShutdown_ = true;
 }
 
 // 等待伺服状态：在超时范围内轮询目标状态，报警时立即返回失败。

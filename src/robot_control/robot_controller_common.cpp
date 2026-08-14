@@ -1,5 +1,6 @@
 #include "robot_control/robot_jog_controller.h"
 
+#include <algorithm>
 #include <iostream>
 
 // 构造函数：只保存 SDK 适配器，不连接控制器，也不改变机械臂状态。
@@ -28,12 +29,9 @@ bool RobotJogController::requireSuccess(Result result, const char* operation) co
 // 点动状态检查：判断本会话是否仍记录着未停止的轴。
 bool RobotJogController::hasActiveJogging() const
 {
-    for (bool active : activeAxes_) {
-        if (active) {
-            return true;
-        }
-    }
-    return false;
+    return std::any_of(activeAxes_.begin(), activeAxes_.end(), [](bool active) {
+        return active;
+    });
 }
 
 // 位置运动前置检查：必须已连接、伺服运行，并且没有持续点动命令。

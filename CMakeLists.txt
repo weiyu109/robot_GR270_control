@@ -25,6 +25,9 @@ add_library(robot_jog_controller STATIC
     src/robot_control/robot_jog_control.cpp
     src/robot_control/robot_joint_motion.cpp
     src/robot_control/robot_cartesian_motion.cpp
+    src/robot_control/robot_state_query.cpp
+    src/robot_control/robot_tcp_control.cpp
+    src/robot_control/robot_queue_motion.cpp
     src/robot_control/robot_jog_session.cpp
     src/robot_control/robot_sdk_api.cpp)
 target_include_directories(robot_jog_controller PUBLIC
@@ -32,20 +35,29 @@ target_include_directories(robot_jog_controller PUBLIC
     "${NRC_SDK_ROOT}/interface")
 target_link_libraries(robot_jog_controller PUBLIC jog_input)
 
+# 数字终端菜单和键盘遥操作动作，与厂商SDK适配细节解耦。
+add_library(robot_terminal STATIC
+    src/terminal/robot_debug_menu.cpp
+    src/terminal/keyboard_teleop_action.cpp)
+target_include_directories(robot_terminal PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_link_libraries(robot_terminal PUBLIC robot_jog_controller)
+
 add_executable(keyboard_jog_demo apps/keyboard_jog_demo.cpp)
-target_link_libraries(keyboard_jog_demo PRIVATE robot_jog_controller)
+target_link_libraries(keyboard_jog_demo PRIVATE robot_terminal)
 
 if(MSVC)
     target_sources(keyboard_jog_demo PRIVATE src/input/windows_console_key_reader.cpp)
     add_executable(key_monitor apps/key_monitor.cpp)
     target_compile_options(keyboard_jog_demo PRIVATE /utf-8)
+    target_compile_options(robot_terminal PRIVATE /utf-8)
     target_compile_options(key_monitor PRIVATE /utf-8)
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         set(NRC_LIB_DIR "${NRC_SDK_ROOT}/cpp/windows/temp_win_msvc2017_x64_v2.0.4")
     else()
         set(NRC_LIB_DIR "${NRC_SDK_ROOT}/cpp/windows/temp_win_msvc2017_x86_v2.0.4")
     endif()
-    target_link_libraries(keyboard_jog_demo PRIVATE "${NRC_LIB_DIR}/nrc_host.lib" user32)
+    target_link_libraries(robot_jog_controller PUBLIC "${NRC_LIB_DIR}/nrc_host.lib")
+    target_link_libraries(keyboard_jog_demo PRIVATE user32)
     target_link_libraries(key_monitor PRIVATE user32)
 elseif(MINGW)
     target_sources(keyboard_jog_demo PRIVATE src/input/windows_console_key_reader.cpp)
@@ -55,8 +67,8 @@ elseif(MINGW)
     else()
         set(NRC_LIB_DIR "${NRC_SDK_ROOT}/cpp/windows/temp_win_mingw32_v2.0.4")
     endif()
-    target_link_libraries(keyboard_jog_demo PRIVATE
-        "${NRC_LIB_DIR}/libnrc_host.dll.a" user32)
+    target_link_libraries(robot_jog_controller PUBLIC "${NRC_LIB_DIR}/libnrc_host.dll.a")
+    target_link_libraries(keyboard_jog_demo PRIVATE user32)
     target_link_libraries(key_monitor PRIVATE user32)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     # 当前随包 Linux SDK 只提供 x86-64 GCC 9 动态库。
@@ -78,9 +90,8 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(keyboard_input_test apps/keyboard_input_test.cpp)
     target_link_libraries(keyboard_input_test PRIVATE linux_evdev_key_reader)
 
-    target_link_libraries(keyboard_jog_demo PRIVATE
-        linux_evdev_key_reader
-        "${NRC_HOST_LIBRARY}")
+    target_link_libraries(robot_jog_controller PUBLIC "${NRC_HOST_LIBRARY}")
+    target_link_libraries(keyboard_jog_demo PRIVATE linux_evdev_key_reader)
     set_target_properties(keyboard_jog_demo PROPERTIES BUILD_RPATH "${NRC_LIB_DIR}")
 
     include(CTest)
@@ -88,11 +99,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_executable(jog_input_tests tests/jog_input_tests.cpp)
         target_link_libraries(jog_input_tests PRIVATE linux_evdev_key_reader)
         add_executable(robot_jog_controller_tests tests/robot_jog_controller_tests.cpp)
-        target_link_libraries(robot_jog_controller_tests PRIVATE
-            robot_jog_controller
-            "${NRC_HOST_LIBRARY}")
+        target_link_libraries(robot_jog_controller_tests PRIVATE robot_terminal)
+        add_executable(robot_extended_features_tests tests/robot_extended_features_tests.cpp)
+        target_link_libraries(robot_extended_features_tests PRIVATE robot_terminal)
         add_test(NAME jog_input_tests COMMAND jog_input_tests)
         add_test(NAME robot_jog_controller_tests COMMAND robot_jog_controller_tests)
+        add_test(NAME robot_extended_features_tests COMMAND robot_extended_features_tests)
         add_test(NAME keyboard_input_test_help COMMAND keyboard_input_test --help)
     endif()
 else()

@@ -60,15 +60,19 @@ bool RobotJogController::stopJog(int axis)
 }
 
 // 停止全部点动：只停止本会话已经启动并记录的轴，供异常、下电和退出复用。
-void RobotJogController::stopAllJogging()
+bool RobotJogController::stopAllJogging()
 {
     if (!connected_) {
         activeAxes_.fill(false);
-        return;
+        return true;
     }
+    bool allStopped = true;
     for (std::size_t i = 0; i < activeAxes_.size(); ++i) {
         if (activeAxes_[i]) {
-            stopJog(static_cast<int>(i) + 1);
+            if (!stopJog(static_cast<int>(i) + 1)) {
+                allStopped = false;
+            }
         }
     }
+    return allStopped;
 }

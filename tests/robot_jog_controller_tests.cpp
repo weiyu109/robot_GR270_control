@@ -1,8 +1,10 @@
 #include "robot_control/robot_jog_controller.h"
+#include "terminal/robot_debug_menu.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -30,8 +32,10 @@ public:
     Result disconnect(SOCKETFD) override
     {
         calls.push_back("disconnect");
-        connected = false;
-        return SUCCESS;
+        if (disconnectResult == SUCCESS) {
+            connected = false;
+        }
+        return disconnectResult;
     }
     Result receiveMessages(SOCKETFD, ControllerMessageCallback) override
     {
@@ -92,8 +96,10 @@ public:
     Result powerOff(SOCKETFD) override
     {
         calls.push_back("powerOff");
-        servoState = static_cast<int>(ServoState::Ready);
-        return SUCCESS;
+        if (powerOffResult == SUCCESS) {
+            servoState = static_cast<int>(ServoState::Ready);
+        }
+        return powerOffResult;
     }
     Result startJog(SOCKETFD, int axis, bool positive) override
     {
@@ -104,7 +110,7 @@ public:
     Result stopJog(SOCKETFD, int axis) override
     {
         calls.push_back("stopJog:" + std::to_string(axis));
-        return SUCCESS;
+        return stopJogResult;
     }
     Result getCurrentPosition(SOCKETFD,
                               int value,
@@ -126,21 +132,47 @@ public:
         lastLinearCommand = command;
         return SUCCESS;
     }
+    Result getToolNumber(SOCKETFD, int& value) override
+    {
+        value = toolNumber;
+        return SUCCESS;
+    }
+    Result getToolParam(SOCKETFD, int, ToolParam& value) override
+    {
+        value = toolParam;
+        return SUCCESS;
+    }
+    Result setToolParam(SOCKETFD, int, const ToolParam& value) override
+    {
+        toolParam = value;
+        return SUCCESS;
+    }
+    Result queueSetStatus(SOCKETFD, bool) override { return SUCCESS; }
+    Result queueClearData(SOCKETFD) override { return SUCCESS; }
+    Result queuePushMoveLinear(SOCKETFD, const MoveCmd&) override { return SUCCESS; }
+    Result queueSend(SOCKETFD, int, bool) override { return SUCCESS; }
 
     int count(const std::string& call) const
     {
         return static_cast<int>(std::count(calls.begin(), calls.end(), call));
     }
 
+    void allowDisconnect() { disconnectResult = SUCCESS; }
+
     bool connected{false};
     int mode{static_cast<int>(RobotMode::Remote)};
     int teachType{1};
     int coordinate{0};
     int speed{5};
+    int toolNumber{0};
     int servoState{static_cast<int>(ServoState::Stopped)};
+    Result disconnectResult{SUCCESS};
+    Result powerOffResult{SUCCESS};
+    Result stopJogResult{SUCCESS};
     std::vector<double> currentPosition{100.0, 200.0, 300.0, 10.0, 20.0, 30.0, 7.0};
     MoveCmd lastJointCommand;
     MoveCmd lastLinearCommand;
+    ToolParam toolParam{};
     std::vector<std::string> calls;
 };
 
@@ -310,6 +342,94 @@ void testJointCoordinateJogSupportsSixRobotAxes()
     robot.shutdown();
 }
 
+void testShutdownKeepsConnectionWhenStopAndPowerOffFail()
+{
+    FakeRobotSdk sdk;
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+
+    JogSessionConfig config;
+    expect(robot.enterTeachJog(config, [] { return false; }), "session should enter");
+    expect(robot.startJog({1, true}), "X jog should start");
+
+    sdk.stopJogResult = TIMEOUT;
+    sdk.powerOffResult = TIMEOUT;
+    expect(!robot.shutdown(), "shutdown must fail when stop and power-off are unconfirmed");
+    expect(robot.connected(), "failed safe shutdown must preserve controller connection");
+    expect(sdk.connected, "failed safe shutdown must not call successful disconnect");
+    expect(sdk.count("disconnect") == 0,
+           "disconnect SDK must not be called after stop and power-off failure");
+    expect(!robot.connect("127.0.0.1", "6001"),
+           "reconnect must be rejected while the old session is unsafe");
+    expect(sdk.count("connect") == 1,
+           "failed old-session cleanup must not create a second SDK connection");
+
+    sdk.stopJogResult = SUCCESS;
+    sdk.powerOffResult = SUCCESS;
+    expect(robot.shutdown(), "shutdown retry should succeed after controller recovers");
+    expect(!robot.connected(), "successful retry should disconnect controller");
+}
+
+void testDisconnectFailurePreservesConnectionForRetry()
+{
+    FakeRobotSdk sdk;
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+
+    sdk.disconnectResult = TIMEOUT;
+    expect(!robot.shutdown(), "SDK disconnect failure must be reported");
+    expect(robot.connected(), "disconnect failure must preserve local connection state");
+
+    sdk.allowDisconnect();
+    expect(robot.shutdown(), "disconnect retry should succeed");
+    expect(!robot.connected(), "successful disconnect retry should clear connection state");
+}
+
+void testRelativeJointAndCartesianMenuActions()
+{
+    FakeRobotSdk sdk;
+    sdk.servoState = static_cast<int>(ServoState::Running);
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+
+    std::istringstream input("4\n5\n0\n");
+    std::ostringstream output;
+    std::ostringstream error;
+    RobotDebugMenu menu(
+        robot,
+        [] { return false; },
+        [] { return TeleopResult::ReturnToMenu; },
+        input,
+        output,
+        error);
+    expect(menu.run() == 0, "menu should exit on option zero");
+    expect(sdk.count("moveJoint") == 1, "menu option 4 should send one MoveJ");
+    expect(sdk.lastJointCommand.targetPosValue[0] == 101.0,
+           "menu option 4 should add one degree to current J1");
+    expect(sdk.lastJointCommand.targetPosValue[1] == 200.0,
+           "menu option 4 should preserve J2");
+    expect(sdk.count("moveLinear") == 1, "menu option 5 should send one MoveL");
+    expect(sdk.lastLinearCommand.targetPosValue[0] == 150.0,
+           "menu option 5 should add 50 mm to current X");
+    expect(sdk.lastLinearCommand.velocity == 20.0,
+           "menu option 5 should use 20 mm/s");
+    robot.shutdown();
+}
+
+void testTerminalShutdownAlwaysPowersOffRunningServo()
+{
+    FakeRobotSdk sdk;
+    sdk.servoState = static_cast<int>(ServoState::Running);
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+    robot.requirePowerOffOnShutdown();
+    expect(robot.shutdown(), "terminal shutdown should succeed");
+    expect(sdk.count("powerOff") == 1,
+           "terminal shutdown must power off even when servo was already running at connect");
+    expect(sdk.count("disconnect") == 1,
+           "terminal shutdown should disconnect after power-off confirmation");
+}
+
 } // namespace
 
 int main()
@@ -322,6 +442,10 @@ int main()
     testJointMoveBuildsMinimalMoveCommand();
     testCartesianXyzMovePreservesCurrentOrientation();
     testJointCoordinateJogSupportsSixRobotAxes();
+    testShutdownKeepsConnectionWhenStopAndPowerOffFail();
+    testDisconnectFailurePreservesConnectionForRetry();
+    testRelativeJointAndCartesianMenuActions();
+    testTerminalShutdownAlwaysPowersOffRunningServo();
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";

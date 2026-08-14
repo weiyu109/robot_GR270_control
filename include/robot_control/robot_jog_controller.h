@@ -7,6 +7,7 @@
 #include <array>
 #include <functional>
 #include <string>
+#include <vector>
 
 enum class RobotMode : int {
     Teach = 0,
@@ -75,8 +76,8 @@ public:
                  const std::string& port,
                  ControllerMessageCallback messageCallback = nullptr);
 
-    // 安全断开：停止点动、按会话责任下电、恢复初始状态后断开 SDK。
-    void disconnect();
+    // 安全断开：只有停止/下电已经确认后才断开 SDK；失败时保留连接供重试。
+    bool disconnect();
 
     // 完整进入示教点动会话。只有返回 true 后才允许发送点动命令。
     bool enterTeachJog(const JogSessionConfig& config,
@@ -93,6 +94,12 @@ public:
     bool setServoReady();
     bool powerOnOnce();
     bool powerOff();
+    // 循环清错、就绪和上电，直到连续确认 Running 或收到退出请求。
+    bool powerOnUntilRunning(const ExitRequested& exitRequested);
+    // 循环停止、清错和下电，直到确认 Ready/Stopped 或收到退出请求。
+    bool powerOffUntilReady(const ExitRequested& exitRequested);
+    // 终端程序关闭时无论初始电源状态如何都必须下电。
+    void requirePowerOffOnShutdown();
     bool getServoState(int& state);
     bool printState();
 
@@ -102,16 +109,37 @@ public:
     bool setJogCoordinate(int coordinate);
     bool startJog(const JogRequest& request);
     bool stopJog(int axis);
-    void stopAllJogging();
+    // 停止本会话记录的全部点动轴；任一轴停止失败时返回 false。
+    bool stopAllJogging();
 
     // 发送一次关节目标位置命令（robot_movej），不是持续点动命令。
     bool moveJoints(const JointMoveCommand& command);
+    // 读取当前关节位置，再让指定关节相对移动给定角度。
+    bool moveJointRelative(int jointNumber,
+                           double deltaDegrees,
+                           double velocityPercent = 10.0);
 
     // 发送一次 XYZ 直线目标命令（robot_movel），保留当前位置的姿态。
     bool moveCartesianXyz(const CartesianXyzCommand& command);
+    // 读取当前直角坐标，再让 X 相对移动给定距离。
+    bool moveCartesianXRelative(double deltaMillimeters,
+                                double velocityMillimetersPerSecond);
 
-    // 幂等清理，可主动调用；析构函数也会执行一次。
-    void shutdown();
+    // 读取控制器当前位置。coordinate=0为关节，coordinate=1为末端直角位姿。
+    bool getCurrentPosition(int coordinate, std::vector<double>& position);
+
+    // 读取当前激活的工具手编号及其TCP/负载参数。
+    bool getCurrentTcp(int& toolNumber, ToolParam& param);
+    // 仅把当前激活TCP的Z偏移设为指定值，其余TCP和负载参数保持不变。
+    bool setCurrentTcpZ(double zMillimeters);
+    // 把当前激活TCP的XYZABC归零，负载、惯量和质心参数保持不变。
+    bool resetCurrentTcpPose();
+
+    // 发送固定50点MoveL阶梯队列：X总前进100mm，速度100mm/s，两批各25点拼接。
+    bool runStairQueueTest();
+
+    // 幂等清理。安全状态未确认时返回 false，并保留 SDK 连接供再次停止/下电。
+    bool shutdown();
 
     bool connected() const { return connected_; }
     bool joggingEnabled() const { return joggingEnabled_; }
@@ -129,6 +157,7 @@ private:
     bool connected_{false};
     bool joggingEnabled_{false};
     bool poweredOnBySession_{false};
+    bool powerOffRequiredOnShutdown_{false};
     int previousMode_{-1};
     int initialServoState_{-1};
     // 厂商 MoveCmd 为本体预留 7 个轴位；六轴 GR270 实际使用前 6 位。

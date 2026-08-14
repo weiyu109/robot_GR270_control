@@ -43,3 +43,29 @@ bool RobotJogController::moveCartesianXyz(const CartesianXyzCommand& command)
     sdkCommand.userNum = command.userNumber;
     return requireSuccess(sdk_.moveLinear(socket_, sdkCommand), "robot_movel");
 }
+
+// X 相对位置控制：读取当前直角坐标，把 X 增加指定毫米数后发送 robot_movel。
+bool RobotJogController::moveCartesianXRelative(
+    double deltaMillimeters,
+    double velocityMillimetersPerSecond)
+{
+    if (!connected_) {
+        return false;
+    }
+    std::vector<double> currentPosition;
+    if (!requireSuccess(sdk_.getCurrentPosition(socket_, 1, currentPosition),
+                        "get_current_position(cartesian)")) {
+        return false;
+    }
+    if (currentPosition.size() < 7) {
+        std::cerr << "Cartesian position query returned fewer than 7 values.\n";
+        return false;
+    }
+
+    CartesianXyzCommand command;
+    command.xMillimeters = currentPosition[0] + deltaMillimeters;
+    command.yMillimeters = currentPosition[1];
+    command.zMillimeters = currentPosition[2];
+    command.velocityMillimetersPerSecond = velocityMillimetersPerSecond;
+    return moveCartesianXyz(command);
+}

@@ -14,14 +14,15 @@ bool RobotJogController::enterTeachJog(const JogSessionConfig& config,
         return false;
     }
 
-    if (!requireSuccess(sdk_.getMode(socket_, previousMode_), "get_current_mode")
+    if ((previousMode_ < 0
+         && !requireSuccess(sdk_.getMode(socket_, previousMode_), "get_current_mode"))
         || !setMode(RobotMode::Teach)
         || !requireSuccess(sdk_.setTeachType(socket_, kTeachTypeJog),
                            "set_teach_type(jog)")) {
         return false;
     }
 
-    if (!getServoState(initialServoState_)
+    if ((initialServoState_ < 0 && !getServoState(initialServoState_))
         || !ensureServoRunning(exitRequested, config.restartIfRunning)) {
         return false;
     }

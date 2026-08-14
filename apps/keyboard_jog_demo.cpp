@@ -10,11 +10,11 @@
 #error Unsupported platform
 #endif
 
-#include "input/jog_input.h"
 #include "robot_control/robot_jog_controller.h"
 #include "robot_control/robot_sdk_api.h"
+#include "terminal/keyboard_teleop_action.h"
+#include "terminal/robot_debug_menu.h"
 
-#include <array>
 #include <chrono>
 #include <cstdlib>
 #include <iostream>
@@ -24,9 +24,7 @@
 namespace {
 
 constexpr int kDefaultSpeedPercent = 10;
-constexpr auto kJogPeriod = std::chrono::milliseconds(100);
-constexpr auto kKeyboardPollPeriod = std::chrono::milliseconds(10);
-constexpr auto kServoHealthCheckPeriod = std::chrono::milliseconds(200);
+constexpr auto kShutdownRetryPeriod = std::chrono::milliseconds(300);
 
 #ifdef _WIN32
 std::atomic_bool g_exitRequested{false};
@@ -46,13 +44,11 @@ BOOL WINAPI consoleHandler(DWORD event)
     }
 }
 
-void requestExit() { g_exitRequested = true; }
 bool exitRequested() { return g_exitRequested.load(); }
 #else
 volatile std::sig_atomic_t g_exitRequested = 0;
 
 void signalHandler(int) { g_exitRequested = 1; }
-void requestExit() { g_exitRequested = 1; }
 bool exitRequested() { return g_exitRequested != 0; }
 #endif
 
@@ -61,6 +57,19 @@ void controllerMessageCallback(int messageId, const char* message)
 {
     std::cout << "[CONTROLLER MESSAGE] id=" << messageId
               << " message=" << (message != nullptr ? message : "") << '\n';
+}
+
+// 页面关闭或菜单退出时循环下电；确认安全状态后才断开SDK。
+void shutdownWithRetry(RobotJogController& robot)
+{
+    int attempt = 0;
+    while (!robot.shutdown()) {
+        ++attempt;
+        std::cerr << "Safe shutdown attempt " << attempt
+                  << " failed. SDK connection is retained; retrying. "
+                     "Use the emergency stop if robot motion is not confirmed stopped.\n";
+        std::this_thread::sleep_for(kShutdownRetryPeriod);
+    }
 }
 
 } // namespace
@@ -85,14 +94,12 @@ int main(int argc, char* argv[])
                      " <input_device>\n";
         return 2;
     }
-    const std::string inputDevice = argv[4];
-    EvdevKeyReader keyReader(inputDevice);
+    EvdevKeyReader keyReader(argv[4]);
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
     std::signal(SIGHUP, signalHandler);
 #endif
 
-    // 键盘必须先验证成功，输入异常时不能连接或改变机械臂状态。
     if (!keyReader.valid()) {
         std::cerr << keyReader.error() << '\n';
         return 1;
@@ -105,132 +112,26 @@ int main(int argc, char* argv[])
         return 1;
     }
 
+    // 本终端无论机械臂进入程序前是否已上电，退出时都必须确认下电后再断开。
+    robot.requirePowerOffOnShutdown();
     std::cout
-        << "WARNING: This program can move the robot.\n"
+        << "WARNING: Menu actions can move the robot immediately after Enter.\n"
         << "Clear the work area and keep the emergency stop available.\n"
 #ifdef __linux__
-        << "Linux evdev input is global: arrow keys remain active when another window has focus.\n"
+        << "Linux evdev input is global while keyboard teleoperation is active.\n"
 #endif
-        << "Type ENABLE and press Enter to enter teach/jog mode and power on: ";
+        ;
 
-    std::string confirmation;
-    std::getline(std::cin, confirmation);
-    if (confirmation != "ENABLE") {
-        std::cout << "Cancelled.\n";
-        robot.shutdown();
-        return 0;
-    }
+    RobotDebugMenu menu(
+        robot,
+        exitRequested,
+        [&] { return runKeyboardTeleop(robot, keyReader, speed, exitRequested); },
+        std::cin,
+        std::cout,
+        std::cerr);
+    const int result = menu.run();
 
-    // 清掉输入 ENABLE 期间产生的事件，确保进入运动状态时所有轴从“未按下”开始。
-    if (!keyReader.discardPendingEvents()) {
-        std::cerr << keyReader.error() << "; refusing to enter jog mode.\n";
-        robot.shutdown();
-        return 1;
-    }
-
-    JogSessionConfig config;
-    config.speedPercent = speed;
-    config.coordinate = 1;          // 直角坐标系
-    config.restartIfRunning = true; // 已上电时按已验证流程先下电再重新上电
-    if (!robot.enterTeachJog(config, exitRequested)) {
-        robot.shutdown();
-        return 1;
-    }
-
-    std::cout
-        << "Connected. Cartesian coordinate mode selected.\n"
-        << "Hold UP for X+, hold DOWN for X-.\n"
-        << "Hold LEFT for Y+, hold RIGHT for Y-.\n"
-        << "Hold + for Z+, hold - for Z-.\n"
-        << "X, Y and Z may be jogged together; opposite keys cancel that axis.\n"
-        << "Release the key to stop. Press ESC or Ctrl+C to exit.\n"
-        << "Speed: " << speed << "%\n";
-
-    std::array<JogRequest, 3> activeRequests{};
-    std::array<std::chrono::steady_clock::time_point, 3> nextJogSend{
-        std::chrono::steady_clock::now(),
-        std::chrono::steady_clock::now(),
-        std::chrono::steady_clock::now()
-    };
-    auto nextServoHealthCheck = std::chrono::steady_clock::now();
-
-    while (!exitRequested()) {
-        KeySnapshot keys;
-        if (!keyReader.poll(keys)) {
-            std::cerr << keyReader.error() << "; stopping for safety.\n";
-            break;
-        }
-        if (keys.escape) {
-            break;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-
-        // 运行中只响应主动读取的伺服状态，不在错误/警告回调中执行恢复动作。
-        if (now >= nextServoHealthCheck) {
-            int servoState = -1;
-            if (!robot.getServoState(servoState)) {
-                break;
-            }
-            if (servoState != static_cast<int>(ServoState::Running)) {
-                std::cerr << "Non-running servo state detected (state=" << servoState
-                          << "); stopping all jogging before recovery.\n";
-                activeRequests.fill({});
-                if (!robot.recoverRunningServo(exitRequested)) {
-                    break;
-                }
-
-                // 恢复后丢弃旧按键，必须重新按键才能再次运动，防止自动续动。
-                if (!keyReader.discardPendingEvents()) {
-                    std::cerr << keyReader.error() << "; stopping for safety.\n";
-                    break;
-                }
-                nextServoHealthCheck = std::chrono::steady_clock::now()
-                    + kServoHealthCheckPeriod;
-                continue;
-            }
-            nextServoHealthCheck = now + kServoHealthCheckPeriod;
-        }
-
-        const auto requestedRequests = makeJogRequests(keys);
-        for (std::size_t i = 0; i < activeRequests.size(); ++i) {
-            JogRequest& active = activeRequests[i];
-            const JogRequest& requested = requestedRequests[i];
-
-            if (requested != active) {
-                // 同轴换向必须先停旧方向，再启动新方向。
-                if (active.axis != 0) {
-                    robot.stopJog(active.axis);
-                }
-                active = requested;
-                if (active.axis != 0) {
-                    if (!robot.startJog(active)) {
-                        active = {};
-                        requestExit();
-                        break;
-                    }
-                    std::cout << "[JOG] START axis=" << active.axis
-                              << " direction="
-                              << (active.positive ? "positive" : "negative")
-                              << " result=SUCCESS\n";
-                    nextJogSend[i] = now + kJogPeriod;
-                }
-            } else if (active.axis != 0 && now >= nextJogSend[i]) {
-                // 点动为保持型命令：按住期间每 100 ms 续发一次。
-                if (!robot.startJog(active)) {
-                    robot.stopJog(active.axis);
-                    active = {};
-                    requestExit();
-                    break;
-                }
-                nextJogSend[i] = now + kJogPeriod;
-            }
-        }
-
-        std::this_thread::sleep_for(kKeyboardPollPeriod);
-    }
-
-    robot.shutdown();
-    std::cout << "Stopped and disconnected.\n";
-    return 0;
+    shutdownWithRetry(robot);
+    std::cout << "Robot powered off and disconnected.\n";
+    return result;
 }

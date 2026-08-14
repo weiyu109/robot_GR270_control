@@ -57,6 +57,36 @@ Result InexbotSdkApi::moveLinear(SOCKETFD socket, const MoveCmd& command)
 {
     return robot_movel(socket, command);
 }
+Result InexbotSdkApi::getToolNumber(SOCKETFD socket, int& toolNumber)
+{
+    return get_tool_hand_number(socket, toolNumber);
+}
+Result InexbotSdkApi::getToolParam(SOCKETFD socket, int toolNumber, ToolParam& param)
+{
+    return get_tool_hand_param(socket, toolNumber, param);
+}
+Result InexbotSdkApi::setToolParam(SOCKETFD socket,
+                                   int toolNumber,
+                                   const ToolParam& param)
+{
+    return set_tool_hand_param(socket, toolNumber, param);
+}
+Result InexbotSdkApi::queueSetStatus(SOCKETFD socket, bool enabled)
+{
+    return queue_motion_set_status(socket, enabled);
+}
+Result InexbotSdkApi::queueClearData(SOCKETFD socket)
+{
+    return queue_motion_clear_Data(socket);
+}
+Result InexbotSdkApi::queuePushMoveLinear(SOCKETFD socket, const MoveCmd& command)
+{
+    return queue_motion_push_back_moveL(socket, command);
+}
+Result InexbotSdkApi::queueSend(SOCKETFD socket, int size, bool isContinue)
+{
+    return queue_motion_send_to_controller(socket, size, isContinue);
+}
 
 const char* sdkResultText(Result result)
 {
