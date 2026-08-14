@@ -1,7 +1,7 @@
 #ifndef KEYBOARD_JOG_DEMO_LINUX_EVDEV_KEY_READER_H
 #define KEYBOARD_JOG_DEMO_LINUX_EVDEV_KEY_READER_H
 
-#include "jog_input.h"
+#include "input/jog_input.h"
 
 #include <string>
 #include <vector>

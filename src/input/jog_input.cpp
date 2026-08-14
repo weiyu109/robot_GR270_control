@@ -1,4 +1,4 @@
-#include "jog_input.h"
+#include "input/jog_input.h"
 
 #ifdef __linux__
 #include <linux/input.h>

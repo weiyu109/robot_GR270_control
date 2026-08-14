@@ -11,15 +11,33 @@ set(NRC_SDK_ROOT
     CACHE PATH "Root directory of the Inexbot host-computer SDK")
 
 # 公共输入状态和 Linux evdev 读取器与机器人 SDK 解耦，便于无硬件测试。
-add_library(jog_input STATIC jog_input.cpp)
-target_include_directories(jog_input PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+add_library(jog_input STATIC src/input/jog_input.cpp)
+target_include_directories(jog_input PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
-add_executable(keyboard_jog_demo main.cpp)
-target_include_directories(keyboard_jog_demo PRIVATE "${NRC_SDK_ROOT}/interface")
-target_link_libraries(keyboard_jog_demo PRIVATE jog_input)
+# 机器人控制层与键盘/界面解耦，供后续 Qt、PySide/ROS2 桥接或其他上位机复用。
+add_library(robot_jog_controller STATIC
+    src/robot_control/robot_controller_common.cpp
+    src/robot_control/robot_connection.cpp
+    src/robot_control/robot_mode_control.cpp
+    src/robot_control/robot_error_control.cpp
+    src/robot_control/robot_power_control.cpp
+    src/robot_control/robot_servo_recovery.cpp
+    src/robot_control/robot_jog_control.cpp
+    src/robot_control/robot_joint_motion.cpp
+    src/robot_control/robot_cartesian_motion.cpp
+    src/robot_control/robot_jog_session.cpp
+    src/robot_control/robot_sdk_api.cpp)
+target_include_directories(robot_jog_controller PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${NRC_SDK_ROOT}/interface")
+target_link_libraries(robot_jog_controller PUBLIC jog_input)
+
+add_executable(keyboard_jog_demo apps/keyboard_jog_demo.cpp)
+target_link_libraries(keyboard_jog_demo PRIVATE robot_jog_controller)
 
 if(MSVC)
-    add_executable(key_monitor key_monitor.cpp)
+    target_sources(keyboard_jog_demo PRIVATE src/input/windows_console_key_reader.cpp)
+    add_executable(key_monitor apps/key_monitor.cpp)
     target_compile_options(keyboard_jog_demo PRIVATE /utf-8)
     target_compile_options(key_monitor PRIVATE /utf-8)
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
@@ -30,7 +48,8 @@ if(MSVC)
     target_link_libraries(keyboard_jog_demo PRIVATE "${NRC_LIB_DIR}/nrc_host.lib" user32)
     target_link_libraries(key_monitor PRIVATE user32)
 elseif(MINGW)
-    add_executable(key_monitor key_monitor.cpp)
+    target_sources(keyboard_jog_demo PRIVATE src/input/windows_console_key_reader.cpp)
+    add_executable(key_monitor apps/key_monitor.cpp)
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         set(NRC_LIB_DIR "${NRC_SDK_ROOT}/cpp/windows/temp_win_mingw64_v2.0.4")
     else()
@@ -51,11 +70,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         message(FATAL_ERROR "Inexbot Linux library not found: ${NRC_HOST_LIBRARY}")
     endif()
 
-    add_library(linux_evdev_key_reader STATIC linux_evdev_key_reader.cpp)
-    target_include_directories(linux_evdev_key_reader PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    add_library(linux_evdev_key_reader STATIC src/input/linux_evdev_key_reader.cpp)
+    target_include_directories(linux_evdev_key_reader PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_link_libraries(linux_evdev_key_reader PUBLIC jog_input)
 
-    add_executable(keyboard_input_test keyboard_input_test.cpp)
+    add_executable(keyboard_input_test apps/keyboard_input_test.cpp)
     target_link_libraries(keyboard_input_test PRIVATE linux_evdev_key_reader)
 
     target_link_libraries(keyboard_jog_demo PRIVATE
@@ -67,7 +87,12 @@ elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(BUILD_TESTING)
         add_executable(jog_input_tests tests/jog_input_tests.cpp)
         target_link_libraries(jog_input_tests PRIVATE linux_evdev_key_reader)
+        add_executable(robot_jog_controller_tests tests/robot_jog_controller_tests.cpp)
+        target_link_libraries(robot_jog_controller_tests PRIVATE
+            robot_jog_controller
+            "${NRC_HOST_LIBRARY}")
         add_test(NAME jog_input_tests COMMAND jog_input_tests)
+        add_test(NAME robot_jog_controller_tests COMMAND robot_jog_controller_tests)
         add_test(NAME keyboard_input_test_help COMMAND keyboard_input_test --help)
     endif()
 else()

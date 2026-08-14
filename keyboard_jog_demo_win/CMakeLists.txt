@@ -1,22 +1,45 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(InexbotKeyboardJogDemo LANGUAGES CXX)
+project(InexbotKeyboardJogDemoWin LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+set(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 set(NRC_SDK_ROOT
-    "C:/Users/59857/Desktop/Inexbot Teaching Studio/纳博特二次开发/上位机sdk/库/Inexbot_API_v2.0.4-22.07"
+    "${PROJECT_ROOT}/Inexbot_API_v2.0.4-22.07"
     CACHE PATH "Root directory of the Inexbot host-computer SDK")
 
-add_executable(keyboard_jog_demo main.cpp)
-add_executable(key_monitor key_monitor.cpp)
-target_include_directories(keyboard_jog_demo PRIVATE "${NRC_SDK_ROOT}/interface")
+# Windows 子目录只保留兼容构建入口，所有正式模块统一来自项目根目录。
+add_library(jog_input STATIC "${PROJECT_ROOT}/src/input/jog_input.cpp")
+target_include_directories(jog_input PUBLIC "${PROJECT_ROOT}/include")
+
+add_library(robot_jog_controller STATIC
+    "${PROJECT_ROOT}/src/robot_control/robot_controller_common.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_connection.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_mode_control.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_error_control.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_power_control.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_servo_recovery.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_jog_control.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_joint_motion.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_cartesian_motion.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_jog_session.cpp"
+    "${PROJECT_ROOT}/src/robot_control/robot_sdk_api.cpp")
+target_include_directories(robot_jog_controller PUBLIC
+    "${PROJECT_ROOT}/include"
+    "${NRC_SDK_ROOT}/interface")
+target_link_libraries(robot_jog_controller PUBLIC jog_input)
+
+add_executable(keyboard_jog_demo
+    main.cpp
+    "${PROJECT_ROOT}/src/input/windows_console_key_reader.cpp")
+target_include_directories(keyboard_jog_demo PRIVATE "${PROJECT_ROOT}/include")
+target_link_libraries(keyboard_jog_demo PRIVATE robot_jog_controller user32)
 
 if(MSVC)
     target_compile_options(keyboard_jog_demo PRIVATE /utf-8)
-    target_compile_options(key_monitor PRIVATE /utf-8)
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         set(NRC_LIB_DIR "${NRC_SDK_ROOT}/cpp/windows/temp_win_msvc2017_x64_v2.0.4")
     else()
@@ -31,11 +54,8 @@ elseif(MINGW)
     endif()
     target_link_libraries(keyboard_jog_demo PRIVATE "${NRC_LIB_DIR}/libnrc_host.dll.a")
 else()
-    message(FATAL_ERROR "This demo requires MSVC or MinGW on Windows.")
+    message(FATAL_ERROR "keyboard_jog_demo_win must be built with MSVC or MinGW.")
 endif()
-
-target_link_libraries(keyboard_jog_demo PRIVATE user32)
-target_link_libraries(key_monitor PRIVATE user32)
 
 add_custom_command(TARGET keyboard_jog_demo POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
