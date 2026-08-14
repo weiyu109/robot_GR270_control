@@ -78,6 +78,7 @@ bool RobotJogController::ensureServoRunning(const ExitRequested& exitRequested,
         if (state == static_cast<int>(ServoState::Ready)) {
             stableRunningSamples = 0;
             ++powerOnAttempts;
+            // 恢复上一个实机路线：独立清错完成后，Ready态直接发送上电指令。
             std::cout << "Servo ready. Power-on attempt " << powerOnAttempts << "...\n";
             const Result result = sdk_.powerOn(socket_);
             if (result == SUCCESS) {

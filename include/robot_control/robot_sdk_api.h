@@ -51,6 +51,7 @@ public:
     virtual Result queueClearData(SOCKETFD socket) = 0;
     virtual Result queuePushMoveLinear(SOCKETFD socket, const MoveCmd& command) = 0;
     virtual Result queueSend(SOCKETFD socket, int size, bool isContinue) = 0;
+    virtual Result queueGetRemainingLength(SOCKETFD socket, int& length) = 0;
 };
 
 // 生产环境适配器：把抽象接口逐一转发到纳博特/Inexbot C++ SDK。
@@ -92,6 +93,7 @@ public:
     Result queueClearData(SOCKETFD socket) override;
     Result queuePushMoveLinear(SOCKETFD socket, const MoveCmd& command) override;
     Result queueSend(SOCKETFD socket, int size, bool isContinue) override;
+    Result queueGetRemainingLength(SOCKETFD socket, int& length) override;
 };
 
 const char* sdkResultText(Result result);

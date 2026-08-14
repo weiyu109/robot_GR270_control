@@ -151,6 +151,11 @@ public:
     Result queueClearData(SOCKETFD) override { return SUCCESS; }
     Result queuePushMoveLinear(SOCKETFD, const MoveCmd&) override { return SUCCESS; }
     Result queueSend(SOCKETFD, int, bool) override { return SUCCESS; }
+    Result queueGetRemainingLength(SOCKETFD, int& length) override
+    {
+        length = 0;
+        return SUCCESS;
+    }
 
     int count(const std::string& call) const
     {
@@ -271,6 +276,21 @@ void testLoopClearErrorReachesReadyState()
     expect(sdk.count("clearError") == 1, "alarm should be cleared once in fake SDK");
     expect(sdk.servoState == static_cast<int>(ServoState::Ready),
            "clear-error loop should leave fake servo Ready");
+    robot.shutdown();
+}
+
+void testReadyStateClearErrorStillSendsRequest()
+{
+    FakeRobotSdk sdk;
+    sdk.servoState = static_cast<int>(ServoState::Ready);
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+    expect(robot.clearErrorUntilReady([] { return false; }),
+           "ready-state clear-error should succeed");
+    expect(sdk.count("clearError") == 1,
+           "ready-state clear-error must still send clear_error to clear latent faults");
+    expect(sdk.count("powerOn") == 0,
+           "ready-state clear-error must not power on the servo");
     robot.shutdown();
 }
 
@@ -439,6 +459,7 @@ int main()
     testRuntimeRecoveryStopsJogBeforePowerOn();
     testPowerOnRequiresReadyState();
     testLoopClearErrorReachesReadyState();
+    testReadyStateClearErrorStillSendsRequest();
     testJointMoveBuildsMinimalMoveCommand();
     testCartesianXyzMovePreservesCurrentOrientation();
     testJointCoordinateJogSupportsSixRobotAxes();

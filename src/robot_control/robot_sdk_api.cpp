@@ -87,6 +87,10 @@ Result InexbotSdkApi::queueSend(SOCKETFD socket, int size, bool isContinue)
 {
     return queue_motion_send_to_controller(socket, size, isContinue);
 }
+Result InexbotSdkApi::queueGetRemainingLength(SOCKETFD socket, int& length)
+{
+    return queue_motion_get_queuelen(socket, length);
+}
 
 const char* sdkResultText(Result result)
 {

@@ -62,6 +62,7 @@ void RobotDebugMenu::showMainMenu()
         << "7. 读取末端位姿、关节和当前 TCP\n"
         << "8. 设置当前 TCP\n"
         << "9. 运行 50 点阶梯队列测试\n"
+        << "10. 循环清错（不上电）\n"
         << "0. 安全退出\n";
 }
 
@@ -198,14 +199,27 @@ void RobotDebugMenu::runTcpMenu()
     }
 }
 
-// 发送50点阶梯MoveL队列；前25点继续拼接，后25点结束拼接并触发运行。
+// 发送50点阶梯MoveL队列；等待执行完毕后关闭队列模式并自动下电。
 void RobotDebugMenu::runQueueTest()
 {
     output_ << "开始发送50点阶梯队列：X总前进100mm，速度100mm/s...\n";
-    if (robot_.runStairQueueTest()) {
-        output_ << "50点队列发送完成，两批各25点。\n";
-    } else {
+    if (robot_.runStairQueueTest(exitRequested_)) {
+        output_ << "50点队列执行完成：队列模式已关闭，机械臂已下电。\n";
+    } else if (!exitRequested_()) {
         error_ << "阶梯队列发送失败；请确认机械臂已经上电。\n";
+    } else {
+        output_ << "收到退出请求：已进入关闭队列模式和下电清理流程。\n";
+    }
+}
+
+// 独立循环清错菜单动作：报警解除后停在Ready；已经Running时保持当前状态，不执行上电。
+void RobotDebugMenu::runClearError()
+{
+    output_ << "开始循环清错（不会执行上电）...\n";
+    if (robot_.clearErrorUntilReady(exitRequested_)) {
+        output_ << "清错完成：伺服已处于 Ready/Running。\n";
+    } else if (!exitRequested_()) {
+        error_ << "循环清错失败。\n";
     }
 }
 
@@ -238,6 +252,7 @@ int RobotDebugMenu::run()
         case 7: runReadRobotInfo(); break;
         case 8: runTcpMenu(); break;
         case 9: runQueueTest(); break;
+        case 10: runClearError(); break;
         default: error_ << "菜单序号无效。\n"; break;
         }
     }

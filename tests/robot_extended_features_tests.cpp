@@ -1,6 +1,7 @@
 #include "robot_control/robot_jog_controller.h"
 #include "terminal/robot_debug_menu.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <sstream>
@@ -24,7 +25,11 @@ class ExtendedFeatureFakeSdk final : public RobotSdkApi
 {
 public:
     SOCKETFD connect(const std::string&, const std::string&) override { return 42; }
-    Result disconnect(SOCKETFD) override { return SUCCESS; }
+    Result disconnect(SOCKETFD) override
+    {
+        calls.push_back("disconnect");
+        return SUCCESS;
+    }
     Result receiveMessages(SOCKETFD, ControllerMessageCallback) override { return SUCCESS; }
     Result getMode(SOCKETFD, int& value) override { value = 0; return SUCCESS; }
     Result setMode(SOCKETFD, int) override { return SUCCESS; }
@@ -36,13 +41,28 @@ public:
     Result setSpeed(SOCKETFD, int) override { return SUCCESS; }
     Result getServoState(SOCKETFD, int& value) override
     {
-        value = static_cast<int>(ServoState::Running);
+        value = servoState;
         return SUCCESS;
     }
     Result setServoState(SOCKETFD, int) override { return SUCCESS; }
-    Result clearError(SOCKETFD) override { return SUCCESS; }
-    Result powerOn(SOCKETFD) override { return SUCCESS; }
-    Result powerOff(SOCKETFD) override { return SUCCESS; }
+    Result clearError(SOCKETFD) override
+    {
+        calls.push_back("clearError");
+        servoState = static_cast<int>(ServoState::Ready);
+        return SUCCESS;
+    }
+    Result powerOn(SOCKETFD) override
+    {
+        calls.push_back("powerOn");
+        servoState = static_cast<int>(ServoState::Running);
+        return SUCCESS;
+    }
+    Result powerOff(SOCKETFD) override
+    {
+        calls.push_back("powerOff");
+        servoState = static_cast<int>(ServoState::Ready);
+        return SUCCESS;
+    }
     Result startJog(SOCKETFD, int, bool) override { return SUCCESS; }
     Result stopJog(SOCKETFD, int) override { return SUCCESS; }
     Result getCurrentPosition(SOCKETFD,
@@ -73,6 +93,10 @@ public:
     }
     Result queueSetStatus(SOCKETFD, bool enabled) override
     {
+        calls.push_back(enabled ? "queueStatus:on" : "queueStatus:off");
+        if (!enabled && queueDisableResult != SUCCESS) {
+            return queueDisableResult;
+        }
         queueEnabled = enabled;
         return SUCCESS;
     }
@@ -91,18 +115,38 @@ public:
         sends.emplace_back(size, isContinue);
         return SUCCESS;
     }
+    Result queueGetRemainingLength(SOCKETFD, int& length) override
+    {
+        calls.push_back("queueLength");
+        if (queueLengths.empty()) {
+            length = 0;
+        } else {
+            const std::size_t index = std::min(queueLengthIndex,
+                                               queueLengths.size() - 1);
+            length = queueLengths[index];
+            ++queueLengthIndex;
+        }
+        return SUCCESS;
+    }
+
+    void allowQueueDisable() { queueDisableResult = SUCCESS; }
 
     int toolNumber{3};
     int lastSetToolNumber{-1};
     int toolSetCount{0};
     bool queueEnabled{false};
     bool queueCleared{false};
+    int servoState{static_cast<int>(ServoState::Running)};
+    Result queueDisableResult{SUCCESS};
+    std::size_t queueLengthIndex{0};
+    std::vector<int> queueLengths{50, 25, 0};
     std::vector<double> joints{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.0};
     std::vector<double> cartesian{100.0, 200.0, 300.0, 10.0, 20.0, 30.0, 7.0};
     ToolParam toolParam{1.0, 2.0, -100.0, 4.0, 5.0, 6.0,
                         12.0, 13.0, 14.0, 15.0, 16.0};
     std::vector<MoveCmd> queuedCommands;
     std::vector<std::pair<int, bool>> sends;
+    std::vector<std::string> calls;
 };
 
 void testPositionAndTcpFunctions()
@@ -135,14 +179,15 @@ void testPositionAndTcpFunctions()
            "TCP reset should preserve payload data");
 }
 
-void testFiftyPointStairQueue()
+void testFiftyPointStairQueueCompletesAndPowersOff()
 {
     ExtendedFeatureFakeSdk sdk;
     RobotJogController robot(sdk);
     expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
-    expect(robot.runStairQueueTest(), "stair queue should be accepted by fake SDK");
+    expect(robot.runStairQueueTest([] { return false; }),
+           "stair queue should complete in fake SDK");
 
-    expect(sdk.queueEnabled, "queue mode should be enabled");
+    expect(!sdk.queueEnabled, "completed queue should close queue mode");
     expect(sdk.queueCleared, "local queue should be cleared before filling");
     expect(sdk.queuedCommands.size() == 50, "exactly 50 MoveL points should be queued");
     if (sdk.queuedCommands.size() == 50) {
@@ -168,6 +213,48 @@ void testFiftyPointStairQueue()
         expect(sdk.sends[1] == std::make_pair(25, false),
                "second 25 points should close concatenation and start motion");
     }
+    const auto queueOff = std::find(sdk.calls.begin(), sdk.calls.end(), "queueStatus:off");
+    const auto powerOff = std::find(sdk.calls.begin(), sdk.calls.end(), "powerOff");
+    expect(queueOff < powerOff,
+           "completed queue should close queue mode before power-off");
+    expect(sdk.servoState == static_cast<int>(ServoState::Ready),
+           "completed queue should leave servo powered off in Ready state");
+}
+
+void testExitDuringQueueClosesModeAndPowersOffWithoutStop()
+{
+    ExtendedFeatureFakeSdk sdk;
+    sdk.queueLengths = {50, 50};
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+    int exitChecks = 0;
+    expect(!robot.runStairQueueTest([&exitChecks] { return exitChecks++ > 0; }),
+           "exit request should end queue wait without reporting completion");
+
+    expect(std::find(sdk.calls.begin(), sdk.calls.end(), "queueStatus:off")
+               != sdk.calls.end(),
+           "exit during queue should close queue mode");
+    expect(std::find(sdk.calls.begin(), sdk.calls.end(), "powerOff")
+               != sdk.calls.end(),
+           "exit during queue should power off");
+}
+
+void testQueueDisableFailureIsRetriedByShutdown()
+{
+    ExtendedFeatureFakeSdk sdk;
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+    sdk.queueDisableResult = TIMEOUT;
+    expect(!robot.runStairQueueTest([] { return false; }),
+           "queue-mode disable failure should fail queue completion cleanup");
+    expect(robot.connected(), "queue cleanup failure should keep connection available");
+
+    sdk.allowQueueDisable();
+    expect(robot.shutdown(), "queue-mode disable retry should succeed");
+    expect(std::count(sdk.calls.begin(), sdk.calls.end(), "queueStatus:off") == 2,
+           "retry should repeat only queue-mode disable");
+    expect(std::count(sdk.calls.begin(), sdk.calls.end(), "powerOff") == 1,
+           "queue cleanup retry should not repeat an already successful power-off");
 }
 
 void testMenuRoutesNewOptions()
@@ -196,13 +283,45 @@ void testMenuRoutesNewOptions()
     expect(error.str().empty(), "new menu actions should not print errors in fake test");
 }
 
+void testMenuClearErrorDoesNotPowerOn()
+{
+    ExtendedFeatureFakeSdk sdk;
+    sdk.servoState = static_cast<int>(ServoState::Ready);
+    RobotJogController robot(sdk);
+    expect(robot.connect("127.0.0.1", "6001"), "connect should succeed");
+    std::istringstream input("10\n0\n");
+    std::ostringstream output;
+    std::ostringstream error;
+    RobotDebugMenu menu(
+        robot,
+        [] { return false; },
+        [] { return TeleopResult::ReturnToMenu; },
+        input,
+        output,
+        error);
+
+    expect(menu.run() == 0, "menu option 10 should clear error and exit");
+    expect(std::count(sdk.calls.begin(), sdk.calls.end(), "clearError") == 1,
+           "menu option 10 should call clear_error even while servo is Ready");
+    expect(std::find(sdk.calls.begin(), sdk.calls.end(), "powerOn") == sdk.calls.end(),
+           "menu option 10 must not power on the servo");
+    expect(sdk.servoState == static_cast<int>(ServoState::Ready),
+           "menu option 10 should leave cleared alarm in Ready state");
+    expect(output.str().find("清错完成") != std::string::npos,
+           "menu option 10 should report successful error clearing");
+    expect(error.str().empty(), "successful menu clear-error should not print errors");
+}
+
 } // namespace
 
 int main()
 {
     testPositionAndTcpFunctions();
-    testFiftyPointStairQueue();
+    testFiftyPointStairQueueCompletesAndPowersOff();
+    testExitDuringQueueClosesModeAndPowersOffWithoutStop();
+    testQueueDisableFailureIsRetriedByShutdown();
     testMenuRoutesNewOptions();
+    testMenuClearErrorDoesNotPowerOn();
     if (failures != 0) {
         std::cerr << failures << " extended feature assertion(s) failed\n";
         return EXIT_FAILURE;

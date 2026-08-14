@@ -34,6 +34,7 @@ private:
     void runReadRobotInfo();
     void runTcpMenu();
     void runQueueTest();
+    void runClearError();
 
     RobotJogController& robot_;
     RobotJogController::ExitRequested exitRequested_;

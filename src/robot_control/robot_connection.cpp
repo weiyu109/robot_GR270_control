@@ -46,8 +46,10 @@ bool RobotJogController::shutdown()
     }
 
     joggingEnabled_ = false;
+    // 不发送队列停止指令；退出时直接关闭队列模式，然后进入下电流程。
+    const bool queueClosed = closeQueueMode();
     const bool allJoggingStopped = stopAllJogging();
-    bool safeStateConfirmed = allJoggingStopped;
+    bool safeStateConfirmed = allJoggingStopped && queueClosed;
 
     // 本会话负责上电时，下电成功并确认 Ready 可以作为点动停止失败的安全兜底。
     if (poweredOnBySession_ || powerOffRequiredOnShutdown_) {
@@ -69,10 +71,10 @@ bool RobotJogController::shutdown()
                 std::cerr << "Power-off state is unconfirmed; keeping SDK connection for retry.\n";
                 return false;
             }
-            safeStateConfirmed = true;
+            safeStateConfirmed = queueClosed;
         } else if (state == static_cast<int>(ServoState::Ready)
                    || state == static_cast<int>(ServoState::Stopped)) {
-            safeStateConfirmed = true;
+            safeStateConfirmed = queueClosed;
         } else {
             std::cerr << "Servo is in unsafe or unknown state " << state
                       << "; keeping SDK connection for recovery.\n";
@@ -82,7 +84,8 @@ bool RobotJogController::shutdown()
     }
 
     if (!safeStateConfirmed) {
-        std::cerr << "Jog stop is unconfirmed; keeping SDK connection for retry.\n";
+        std::cerr << "Motion stop or queue-mode cleanup is unconfirmed; "
+                     "keeping SDK connection for retry.\n";
         return false;
     }
 
@@ -103,6 +106,7 @@ bool RobotJogController::shutdown()
     joggingEnabled_ = false;
     poweredOnBySession_ = false;
     powerOffRequiredOnShutdown_ = false;
+    queueModeEnabled_ = false;
     previousMode_ = -1;
     initialServoState_ = -1;
     activeAxes_.fill(false);

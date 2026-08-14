@@ -135,8 +135,8 @@ public:
     // 把当前激活TCP的XYZABC归零，负载、惯量和质心参数保持不变。
     bool resetCurrentTcpPose();
 
-    // 发送固定50点MoveL阶梯队列：X总前进100mm，速度100mm/s，两批各25点拼接。
-    bool runStairQueueTest();
+    // 发送固定50点MoveL阶梯队列，等待执行完毕后关闭队列模式并自动下电。
+    bool runStairQueueTest(const ExitRequested& exitRequested);
 
     // 幂等清理。安全状态未确认时返回 false，并保留 SDK 连接供再次停止/下电。
     bool shutdown();
@@ -149,6 +149,7 @@ private:
     bool hasActiveJogging() const;
     bool readyForPositionMotion();
     bool waitForServoState(int expectedState);
+    bool closeQueueMode();
     bool ensureServoRunning(const ExitRequested& exitRequested,
                             bool restartIfAlreadyRunning);
 
@@ -158,6 +159,7 @@ private:
     bool joggingEnabled_{false};
     bool poweredOnBySession_{false};
     bool powerOffRequiredOnShutdown_{false};
+    bool queueModeEnabled_{false};
     int previousMode_{-1};
     int initialServoState_{-1};
     // 厂商 MoveCmd 为本体预留 7 个轴位；六轴 GR270 实际使用前 6 位。
